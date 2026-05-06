@@ -24,16 +24,36 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-)
 logger = logging.getLogger(__name__)
+
+
+class APIError(Exception):
+    """Базовое исключение для ошибок при работе с API Практикума."""
+
+
+class APIRequestError(APIError):
+    """Ошибка при выполнении HTTP-запроса к API."""
+
+
+class APIStatusCodeError(APIError):
+    """API вернул неуспешный HTTP-статус."""
 
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
+    tokens = {
+        'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
+        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
+        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
+    }
+    missing = [name for name, value in tokens.items() if not value]
+    if missing:
+        logger.critical(
+            f'Отсутствуют обязательные переменные окружения: '
+            f'{", ".join(missing)}'
+        )
+        return False
+    return True
 
 
 def send_message(bot, message):
@@ -51,9 +71,9 @@ def get_api_answer(timestamp):
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
     except requests.exceptions.RequestException as error:
-        raise Exception(f'Ошибка при запросе к API: {error}')
+        raise APIRequestError(f'Ошибка при запросе к API: {error}')
     if response.status_code != 200:
-        raise Exception(
+        raise APIStatusCodeError(
             f'API вернул код {response.status_code}: {response.text}'
         )
     return response.json()
@@ -83,10 +103,25 @@ def parse_status(homework):
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
+def send_if_new(bot, message, last_message):
+    """Отправляет сообщение, если оно отличается от предыдущего."""
+    if message != last_message:
+        send_message(bot, message)
+        return message
+    return last_message
+
+
 def main():
     """Основная логика работы бота."""
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=(
+            '%(asctime)s [%(levelname)s] '
+            '%(funcName)s:%(lineno)d - %(message)s'
+        ),
+    )
+
     if not check_tokens():
-        logger.critical('Отсутствуют обязательные переменные окружения!')
         raise SystemExit('Программа остановлена.')
 
     bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -99,18 +134,14 @@ def main():
             homeworks = check_response(response)
             if homeworks:
                 message = parse_status(homeworks[0])
-                if message != last_message:
-                    send_message(bot, message)
-                    last_message = message
+                last_message = send_if_new(bot, message, last_message)
             else:
                 logger.debug('Новых статусов нет.')
             timestamp = response.get('current_date', timestamp)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.error(message)
-            if message != last_message:
-                send_message(bot, message)
-                last_message = message
+            last_message = send_if_new(bot, message, last_message)
         time.sleep(RETRY_PERIOD)
 
 
